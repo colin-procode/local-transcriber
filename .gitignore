@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+
+# Personal transcript data and runtime logs
+transcripts/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local editor and OS files
+.DS_Store
+.idea/
+.vscode/

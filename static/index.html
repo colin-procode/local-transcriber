@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Local Transcriber</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Local Transcriber home"><span class="brand-mark">T</span><span>Transcriber</span></a>
+    <div class="runtime-pill" id="runtimePill"><span class="status-dot"></span><span id="runtimeText">Checking local models…</span></div>
+  </header>
+
+  <main class="shell">
+    <aside class="sidebar">
+      <div class="sidebar-heading">
+        <div><p class="eyebrow">YOUR LIBRARY</p><h1>Transcripts</h1></div>
+        <button class="icon-button" id="refreshButton" title="Refresh list" aria-label="Refresh list">↻</button>
+      </div>
+      <label class="search-wrap"><span>⌕</span><input id="searchInput" placeholder="Search transcripts" autocomplete="off"></label>
+      <div id="transcriptList" class="transcript-list"></div>
+      <div id="emptyLibrary" class="empty-library">Your saved transcripts will appear here.</div>
+      <div class="sidebar-foot"><span class="folder-icon">▱</span><span id="folderPath">Saved locally in this project</span></div>
+    </aside>
+
+    <section class="workspace">
+      <section class="record-card" id="recordCard">
+        <div class="record-copy">
+          <div class="live-label"><span class="live-dot" id="liveDot"></span><span id="recordStatus">READY TO TRANSCRIBE</span></div>
+          <h2 id="recordHeading">Capture a conversation</h2>
+          <p id="recordDescription">Load the local models, then start recording your microphone and shared computer audio.</p>
+          <div class="record-actions">
+            <button class="primary-button" id="recordButton" disabled><span class="button-symbol">●</span><span id="recordButtonText">Loading models</span></button>
+            <span class="file-actions">
+              <input id="mediaFileInput" class="file-input" type="file" accept="audio/*,video/*">
+              <label id="filePickLabel" class="secondary-button file-pick" for="mediaFileInput">Choose audio or video</label>
+              <button class="secondary-button" id="transcribeFileButton" disabled>Transcribe file</button>
+            </span>
+            <span class="privacy-note"><span class="lock-icon">◈</span> Audio stays on this computer</span>
+          </div>
+          <div class="file-progress hidden" id="fileProgress" aria-live="polite">
+            <div class="file-progress-label"><span id="fileProgressText">Preparing transcription…</span><span id="fileProgressPercent">0%</span></div>
+            <progress id="fileProgressBar" max="100" value="0"></progress>
+          </div>
+        </div>
+        <div class="wave-art" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      </section>
+
+      <div class="capture-hint" id="captureHint"><strong>Tip:</strong> When prompted, share the tab or window playing audio and enable its audio-sharing option. Allow microphone access too.</div>
+      <div class="media-preview hidden" id="mediaPreview"><video id="fileVideo" controls playsinline class="hidden"></video><audio id="fileAudio" controls class="hidden"></audio></div>
+      <div class="error-banner hidden" id="errorBanner"></div>
+
+      <section class="transcript-panel" id="transcriptPanel">
+        <div class="panel-topline">
+          <div><p class="eyebrow" id="detailEyebrow">LIVE SESSION</p><h2 id="transcriptHeading">Transcript preview</h2></div>
+          <div class="panel-meta"><div class="session-time" id="sessionTime"></div><div class="transcript-actions hidden" id="transcriptActions"><a class="secondary-button" id="downloadTranscriptButton" href="#" download>Download</a><button class="secondary-button danger-button" id="deleteTranscriptButton" type="button">Delete</button></div></div>
+        </div>
+        <div class="live-transcript" id="liveTranscript">
+          <div class="preview-placeholder" id="previewPlaceholder"><div class="placeholder-icon">≋</div><h3>Ready when you are</h3><p>Your transcript will appear here while the conversation is in progress.</p></div>
+        </div>
+        <div class="partial-line hidden" id="partialLine"><span class="partial-source">LIVE</span><span id="partialText"></span></div>
+      </section>
+
+      <section class="details-panel hidden" id="detailsPanel">
+        <div class="details-header"><div><p class="eyebrow">TRANSCRIPT DETAILS</p><h2>About this transcript</h2></div><button class="secondary-button" id="saveDetailsButton">Save changes</button></div>
+        <div class="metadata-grid">
+          <label class="field"><span>Title</span><input id="titleInput" maxlength="200" placeholder="Add a title"></label>
+          <label class="field"><span>Notes</span><textarea id="noteInput" rows="3" maxlength="20000" placeholder="Add context or a reminder"></textarea></label>
+        </div>
+        <div class="speaker-section"><div class="speaker-title"><h3>Speaker names</h3><span>Replace generated labels with names</span></div><div id="speakerNames" class="speaker-names"></div></div>
+      </section>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>
