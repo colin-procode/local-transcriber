@@ -70,4 +70,4 @@ printf 'Downloading Nemotron 3 diarization model…\n'
 nemo-speech pull nvidia/Nemotron-3-Diarization
 
 printf '\nSetup complete. Start the app with:\n  cd %q\n  python3 app.py\n' "$ROOT_DIR"
-printf 'Open http://127.0.0.1:8000 after the models finish loading.\n'
+printf 'Open the URL printed by python3 app.py after the models finish loading. On WSL, it will use the WSL private IP so a Windows browser can reach it.\n'

@@ -8,6 +8,7 @@ import math
 import os
 import re
 import signal
+import socket
 import shutil
 import subprocess
 import threading
@@ -16,6 +17,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import wave
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,11 +27,31 @@ from urllib.parse import parse_qs, unquote, urlparse
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "static"
 TRANSCRIPTS_DIR = ROOT / "transcripts"
-APP_HOST = os.environ.get("TRANSCRIBER_HOST", "127.0.0.1")
+
+
+def default_bind_host() -> str:
+    """Use WSL's private VM address so Windows browsers can reach the app."""
+    try:
+        kernel = Path("/proc/sys/kernel/osrelease").read_text(encoding="utf-8").lower()
+    except OSError:
+        kernel = ""
+    if "microsoft" not in kernel and "wsl" not in os.environ.get("WSL_DISTRO_NAME", "").lower():
+        return "127.0.0.1"
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route_probe:
+            route_probe.connect(("192.0.2.1", 80))
+            address = route_probe.getsockname()[0]
+        return address if not address.startswith("127.") else "127.0.0.1"
+    except OSError:
+        return "127.0.0.1"
+
+
+APP_HOST = os.environ.get("TRANSCRIBER_HOST", default_bind_host())
 APP_PORT = int(os.environ.get("TRANSCRIBER_PORT", "8000"))
 MODEL_HOST = "127.0.0.1"
 MODEL_PORT = int(os.environ.get("TRANSCRIBER_MODEL_PORT", "8766"))
 MODEL_URL = f"http://{MODEL_HOST}:{MODEL_PORT}"
+QWEN_HOST = os.environ.get("TRANSCRIBER_QWEN_HOST", APP_HOST)
 QWEN_PORT = int(os.environ.get("TRANSCRIBER_QWEN_PORT", "8767"))
 QWEN_HEALTH_PORT = QWEN_PORT + 1
 DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
@@ -67,7 +89,7 @@ def runtime_status() -> dict:
     if runtime_binary() is None:
         return {"ready": False, "runtime": "missing", "message": "Run ./setup.sh to install the local models and runtime, then restart this app."}
     try:
-        with urllib.request.urlopen(f"http://{MODEL_HOST}:{QWEN_HEALTH_PORT}/ready", timeout=1.5) as response:
+        with urllib.request.urlopen(f"http://{QWEN_HOST}:{QWEN_HEALTH_PORT}/ready", timeout=1.5) as response:
             qwen_status = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
         with _process_lock:
@@ -107,7 +129,7 @@ def start_model_runtime() -> None:
                 qwen_log = _qwen_log_path.open("ab", buffering=0)
                 try:
                     _qwen_process = subprocess.Popen(
-                        [str(QWEN_PYTHON), str(ROOT / "qwen_stream_server.py"), "--host", MODEL_HOST, "--port", str(QWEN_PORT), "--health-port", str(QWEN_HEALTH_PORT)],
+                        [str(QWEN_PYTHON), str(ROOT / "qwen_stream_server.py"), "--host", QWEN_HOST, "--port", str(QWEN_PORT), "--health-port", str(QWEN_HEALTH_PORT)],
                         cwd=ROOT,
                         stdin=subprocess.DEVNULL,
                         stdout=qwen_log,
@@ -161,7 +183,7 @@ def start_model_runtime() -> None:
         qwen_log = _qwen_log_path.open("ab", buffering=0)
         try:
             _qwen_process = subprocess.Popen(
-                [str(QWEN_PYTHON), str(ROOT / "qwen_stream_server.py"), "--host", MODEL_HOST, "--port", str(QWEN_PORT), "--health-port", str(QWEN_HEALTH_PORT)],
+                [str(QWEN_PYTHON), str(ROOT / "qwen_stream_server.py"), "--host", QWEN_HOST, "--port", str(QWEN_PORT), "--health-port", str(QWEN_HEALTH_PORT)],
                 cwd=ROOT,
                 stdin=subprocess.DEVNULL,
                 stdout=qwen_log,
@@ -325,7 +347,7 @@ class Handler(BaseHTTPRequestHandler):
                 progress = dict(_file_progress)
             if progress.get("stage") == "transcribing":
                 try:
-                    with urllib.request.urlopen(f"http://{MODEL_HOST}:{QWEN_HEALTH_PORT}/progress", timeout=1) as response:
+                    with urllib.request.urlopen(f"http://{QWEN_HOST}:{QWEN_HEALTH_PORT}/progress", timeout=1) as response:
                         model_progress = json.loads(response.read().decode("utf-8"))
                     total = int(model_progress.get("total_chunks", 0))
                     done = int(model_progress.get("completed_chunks", 0))
@@ -399,6 +421,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/api/diarize-live":
+            self.diarize_live_audio(parse_qs(parsed.query))
+            return
         if parsed.path == "/api/transcribe-file":
             self.transcribe_uploaded_file(parse_qs(parsed.query))
             return
@@ -433,6 +458,45 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": f"Could not write transcript: {exc}"}, 500)
             return
         self.send_json({"id": transcript_id, "transcript": data}, 201)
+
+    def diarize_live_audio(self, query: dict[str, list[str]]) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length <= 44 or content_length > 5_000_000_000:
+            self.send_json({"error": "The live audio payload is empty or too large."}, 413)
+            return
+        received = 0
+        set_file_progress("diarizing", 0, "Adding speaker labels to live audio…")
+        try:
+            with tempfile.TemporaryDirectory(prefix="local-transcriber-live-") as temporary:
+                wav_path = Path(temporary) / "live.wav"
+                with wav_path.open("wb") as destination:
+                    while received < content_length:
+                        chunk = self.rfile.read(min(1024 * 1024, content_length - received))
+                        if not chunk:
+                            raise ValueError("Live audio upload ended before the complete recording arrived")
+                        destination.write(chunk)
+                        received += len(chunk)
+                with wave.open(str(wav_path), "rb") as audio:
+                    if audio.getnchannels() != 1 or audio.getsampwidth() != 2 or audio.getframerate() != 16000:
+                        raise ValueError("Live audio must be 16 kHz mono PCM")
+                result = self.diarize_file(wav_path)
+            set_file_progress("complete", 100, "Speaker detection complete")
+            self.send_json({"segments": result.get("segments", []), "source": query.get("source", ["system"])[0]})
+        except Exception as exc:
+            set_file_progress("error", 0, str(exc) or "Speaker detection failed")
+            try:
+                with _app_error_log_path.open("a", encoding="utf-8") as log:
+                    log.write(f"\n--- {datetime.now().astimezone().isoformat()} live diarization ---\n")
+                    log.write(traceback.format_exc())
+            except OSError:
+                pass
+            if received < content_length:
+                self.close_connection = True
+                return
+            try:
+                self.send_json({"error": f"Live diarization failed ({type(exc).__name__}): {exc}"}, 500)
+            except OSError:
+                self.close_connection = True
 
     def transcribe_uploaded_file(self, query: dict[str, list[str]]) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -487,7 +551,7 @@ class Handler(BaseHTTPRequestHandler):
                 qwen_body = json.dumps({"path": str(wav_path), "segments": diar_segments}).encode("utf-8")
                 set_file_progress("transcribing", 30, "Preparing audio chunks…")
                 qwen_request = urllib.request.Request(
-                    f"http://{MODEL_HOST}:{QWEN_HEALTH_PORT}/transcribe-file",
+                    f"http://{QWEN_HOST}:{QWEN_HEALTH_PORT}/transcribe-file",
                     data=qwen_body,
                     headers={"Content-Type": "application/json"},
                     method="POST",
@@ -631,7 +695,16 @@ def main() -> None:
     TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
     start_model_runtime()
     server = ThreadingHTTPServer((APP_HOST, APP_PORT), Handler)
+    loopback_server = None
+    if APP_HOST not in {"127.0.0.1", "localhost"}:
+        try:
+            loopback_server = ThreadingHTTPServer(("127.0.0.1", APP_PORT), Handler)
+            threading.Thread(target=loopback_server.serve_forever, daemon=True).start()
+        except OSError as exc:
+            print(f"Loopback listener unavailable: {exc}", flush=True)
     print(f"Transcriber UI: http://{APP_HOST}:{APP_PORT}")
+    if loopback_server:
+        print(f"WSL loopback URL: http://127.0.0.1:{APP_PORT}")
     print(f"Transcript files: {TRANSCRIPTS_DIR}")
     print("Press Ctrl+C to stop the UI. The model server is stopped with this app if this app started it.")
     try:
@@ -640,6 +713,9 @@ def main() -> None:
         pass
     finally:
         server.server_close()
+        if loopback_server:
+            loopback_server.shutdown()
+            loopback_server.server_close()
         if _qwen_process_started_by_app:
             with _process_lock:
                 stop_process_group(_qwen_process)

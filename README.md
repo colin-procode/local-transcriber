@@ -12,7 +12,7 @@ On Linux with an NVIDIA GPU, run the setup script once:
 
 It installs FFmpeg and Python prerequisites when needed, installs NVIDIA's NeMo-Speech.cpp runtime, creates an isolated Qwen/vLLM Python environment, and downloads the Qwen3-ASR 1.7B and Nemotron 3 Diarization models. The setup requires internet access and several gigabytes of free disk space. Model inference runs locally after setup; no API key or hosted transcription service is used.
 
-The app uses Qwen3-ASR 1.7B for live and file transcription, then Nemotron 3 Diarization to add speaker labels when recording stops. For live diarization it temporarily keeps captured PCM in memory; it does not save the audio.
+The app captures microphone and computer audio separately, then runs Qwen3-ASR 1.7B and Nemotron 3 Diarization after you stop recording. Uploaded files use the same local transcription and diarization pipeline. Captured PCM stays in memory until processing; the app does not save audio files.
 
 Use **Choose audio or video** and **Transcribe file** for local batch transcription. The app decodes the file with FFmpeg, sends the audio to Qwen as quickly as inference allows, and runs Nemotron diarization. The file does not play in the browser and stays on this computer. FFmpeg must be installed.
 
@@ -22,7 +22,7 @@ Use **Choose audio or video** and **Transcribe file** for local batch transcript
 python3 app.py
 ```
 
-Open <http://127.0.0.1:8000>. To use a nonstandard runtime location, set `NEMO_SPEECH_BIN` to the full path of the `nemo-speech` executable before starting the app. The app keeps its model service on `127.0.0.1:8766` and the interface on `127.0.0.1:8000`.
+On standard Linux, the app listens on `127.0.0.1`. In WSL, it detects the private WSL network address and prints the matching URL when it starts; open that printed URL in the Windows browser. The Qwen live-transcription socket uses the same interface. Set `TRANSCRIBER_HOST` or `TRANSCRIBER_QWEN_HOST` to override the detected address.
 
 When you press **Start recording**, choose the browser tab or window with the audio and enable its audio-sharing option, then allow microphone access. The app keeps the two streams separate and diarizes both independently. Microphone diarization can distinguish multiple voices audible to the mic; if only your voice is audible, it will usually produce one speaker. Some browsers expose tab audio more reliably than audio from arbitrary desktop applications.
 

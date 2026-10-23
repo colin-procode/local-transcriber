@@ -80,6 +80,16 @@ async def send_event(websocket, event: dict) -> None:
 
 
 async def handle_audio(websocket) -> None:
+    try:
+        await process_audio(websocket)
+    finally:
+        print(
+            f"audio websocket closed code={websocket.close_code} reason={websocket.close_reason!r}",
+            flush=True,
+        )
+
+
+async def process_audio(websocket) -> None:
     assert asr is not None
     state = asr.init_streaming_state(language="English", chunk_size_sec=2.0)
     sample_count = 0
@@ -121,7 +131,8 @@ async def handle_audio(websocket) -> None:
 
 
 async def run_websocket_server(host: str, port: int) -> None:
-    async with websockets.serve(handle_audio, host, port, max_size=None, ping_interval=20, ping_timeout=20):
+    hosts = list(dict.fromkeys((host, "127.0.0.1")))
+    async with websockets.serve(handle_audio, hosts, port, max_size=None, ping_interval=20, ping_timeout=20):
         await asyncio.Future()
 
 
@@ -201,8 +212,14 @@ def main() -> None:
     args = parser.parse_args()
 
     global asr, ready
-    health = ThreadingHTTPServer((args.host, args.health_port), HealthHandler)
-    threading.Thread(target=health.serve_forever, daemon=True).start()
+    health_servers = [ThreadingHTTPServer((args.host, args.health_port), HealthHandler)]
+    if args.host not in {"127.0.0.1", "localhost"}:
+        try:
+            health_servers.append(ThreadingHTTPServer(("127.0.0.1", args.health_port), HealthHandler))
+        except OSError as exc:
+            print(f"Loopback health listener unavailable: {exc}", flush=True)
+    for health in health_servers:
+        threading.Thread(target=health.serve_forever, daemon=True).start()
     asr = Qwen3ASRModel.LLM(
         model="Qwen/Qwen3-ASR-1.7B",
         gpu_memory_utilization=0.85,

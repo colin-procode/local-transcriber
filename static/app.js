@@ -1,12 +1,9 @@
 const $ = (id) => document.getElementById(id);
 const previewPlaceholder = $("previewPlaceholder");
-const SPEECH_RMS_THRESHOLD = 0.007;
 const state = {
   recording: false,
   stopping: false,
   startedAt: null,
-  sockets: {},
-  flushWaiters: {},
   sources: {},
   audioContext: null,
   displayStream: null,
@@ -17,7 +14,6 @@ const state = {
   activeSavedTranscript: null,
   pollTimer: null,
   statusRefreshPending: false,
-  audioCapture: {},
   audioBuffers: {},
   runtimeReady: false,
   fileMediaElement: null,
@@ -141,16 +137,6 @@ async function refreshTranscriptList() {
 function displaySpeaker(speakerId, names = state.speakerNames) {
   if (!speakerId) return "Unknown speaker";
   return names[speakerId] || speakerId.replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-function speakerIdFrom(source, value) {
-  const prefix = source === "mic" ? "MIC_SPEAKER" : "COMPUTER_SPEAKER";
-  if (typeof value === "number") return `${prefix}_${value}`;
-  if (typeof value === "string" && value.trim()) {
-    const match = value.match(/(?:speaker[_ -]?)?(\d+)$/i);
-    return match ? `${prefix}_${match[1]}` : `${prefix}_${value.toUpperCase().replaceAll(" ", "_")}`;
-  }
-  return `${prefix}_1`;
 }
 
 function renderUtterance(utterance, names = state.speakerNames) {
@@ -306,88 +292,6 @@ function downsampleAndEncode(samples, inputRate, outputRate = 16000) {
   return pcm.buffer;
 }
 
-function openModelSocket(source) {
-  return new Promise((resolve, reject) => {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${protocol}//${window.location.hostname}:8767/v1/audio/transcriptions/realtime`);
-    socket.binaryType = "arraybuffer";
-    const timeout = setTimeout(() => reject(new Error("Timed out connecting to local transcription model")), 15000);
-    socket.onopen = () => {
-      clearTimeout(timeout);
-      resolve(socket);
-    };
-    socket.onerror = () => {
-      clearTimeout(timeout);
-      reject(new Error("Could not connect to the local model server"));
-    };
-    socket.onmessage = (message) => handleModelMessage(source, message);
-    socket.onclose = (event) => {
-      state.flushWaiters[source]?.();
-      if (state.recording && !state.stopping && event.code !== 1000) {
-        showError(`The ${source === "mic" ? "microphone" : "computer audio"} transcription connection closed.`);
-      }
-    };
-    state.sockets[source] = socket;
-  });
-}
-
-function handleModelMessage(source, message) {
-  if (typeof message.data !== "string") return;
-  let event;
-  try { event = JSON.parse(message.data); } catch { return; }
-  if (event.type === "error") {
-    showError(event.error?.message || event.message || "The local model returned an error.");
-    state.flushWaiters[source]?.();
-    return;
-  }
-  if (event.type === "conversation.item.input_audio_transcription.delta") {
-    const capture = state.audioCapture[source];
-    if (!capture?.speechSeen || capture.silenceSamples >= 16000 * 0.35) {
-      $("partialLine").classList.add("hidden");
-      return;
-    }
-    $("partialLine").classList.remove("hidden");
-    $("partialText").textContent = event.delta || "";
-    $("partialLine").querySelector(".partial-source").textContent = source === "mic" ? "MIC" : "COMPUTER";
-    return;
-  }
-  if (event.type !== "conversation.item.input_audio_transcription.completed") return;
-
-  const wordItems = Array.isArray(event.words) ? event.words : [];
-  let speaker = null;
-  const normalizedWords = wordItems.map((item) => {
-    const itemSpeaker = speakerIdFrom(source, item.speaker ?? item.speaker_id);
-    speaker = itemSpeaker;
-    const word = String(item.word ?? item.text ?? "").trim();
-    const start = Number(item.start ?? item.start_time ?? 0);
-    const end = Number(item.end ?? item.end_time ?? start);
-    state.words.push({ word, start, end, speaker: itemSpeaker, source });
-    if (itemSpeaker !== "YOU") state.speakerNames[itemSpeaker] ||= displaySpeaker(itemSpeaker, {});
-    return { word, start, end, speaker: itemSpeaker, source };
-  }).filter((item) => item.word);
-
-  const text = String(event.transcript ?? event.text ?? normalizedWords.map((item) => item.word).join(" ")).trim();
-  if (text) {
-    const starts = normalizedWords.map((item) => item.start).filter(Number.isFinite);
-    const ends = normalizedWords.map((item) => item.end).filter(Number.isFinite);
-    const utterance = {
-      source,
-      speaker: speaker || speakerIdFrom(source, null),
-      text,
-      start: Number.isFinite(Number(event.start)) ? Number(event.start) : starts.length ? Math.min(...starts) : 0,
-      end: Number.isFinite(Number(event.end)) ? Number(event.end) : ends.length ? Math.max(...ends) : 0,
-    };
-    if (!normalizedWords.length) {
-      state.words.push({ word: text, start: utterance.start, end: utterance.end, speaker: utterance.speaker, source });
-    }
-    state.utterances.push(utterance);
-    renderLiveTranscript();
-    state.speakerNames[utterance.speaker] ||= displaySpeaker(utterance.speaker, {});
-  }
-  $("partialLine").classList.add("hidden");
-  state.flushWaiters[source]?.();
-}
-
 function wireAudioStream(stream, source) {
   const audioTracks = stream.getAudioTracks();
   if (!audioTracks.length) return false;
@@ -395,55 +299,12 @@ function wireAudioStream(stream, source) {
   const processor = state.audioContext.createScriptProcessor(4096, 1, 1);
   const mute = state.audioContext.createGain();
   mute.gain.value = 0;
-  const capture = { samples: 0, utteranceStart: null, silenceSamples: 0, speechSeen: false, preRoll: [], preRollSamples: 0 };
-  state.audioCapture[source] = capture;
   state.audioBuffers[source] = [];
   processor.onaudioprocess = (event) => {
-    const socket = state.sockets[source];
-    if (!state.recording || !socket || socket.readyState !== WebSocket.OPEN) return;
+    if (!state.recording) return;
     const samples = event.inputBuffer.getChannelData(0);
     const pcm = downsampleAndEncode(samples, state.audioContext.sampleRate);
-    if (pcm.byteLength) {
-      state.audioBuffers[source].push(pcm.slice(0));
-      let energy = 0;
-      for (let i = 0; i < samples.length; i++) energy += samples[i] * samples[i];
-      const rms = Math.sqrt(energy / Math.max(1, samples.length));
-      const sampleLength = pcm.byteLength / 2;
-      const elapsedBefore = capture.samples / 16000;
-      if (rms > SPEECH_RMS_THRESHOLD) {
-        if (!capture.speechSeen) {
-          capture.utteranceStart = Math.max(0, elapsedBefore - capture.preRollSamples / 16000);
-          for (const buffered of capture.preRoll) socket.send(buffered);
-          capture.preRoll = [];
-          capture.preRollSamples = 0;
-        }
-        capture.speechSeen = true;
-        capture.silenceSamples = 0;
-      } else if (capture.speechSeen) {
-        capture.silenceSamples += sampleLength;
-      } else {
-        capture.preRoll.push(pcm.slice(0));
-        capture.preRollSamples += sampleLength;
-        while (capture.preRollSamples > 3200 && capture.preRoll.length) {
-          const removed = capture.preRoll.shift();
-          capture.preRollSamples -= removed.byteLength / 2;
-        }
-      }
-      capture.samples += sampleLength;
-      const shouldSendCurrent = capture.speechSeen;
-      let commit = null;
-      if (capture.speechSeen && capture.silenceSamples >= 16000 * 1.1) {
-        commit = { type: "input_audio_buffer.commit", start: capture.utteranceStart, end: capture.samples / 16000 };
-        capture.speechSeen = false;
-        capture.silenceSamples = 0;
-        capture.utteranceStart = null;
-        capture.preRoll = [];
-        capture.preRollSamples = 0;
-        $("partialLine").classList.add("hidden");
-      }
-      if (shouldSendCurrent) socket.send(pcm);
-      if (commit) socket.send(JSON.stringify(commit));
-    }
+    if (pcm.byteLength) state.audioBuffers[source].push(pcm.slice(0));
   };
   sourceNode.connect(processor);
   processor.connect(mute);
@@ -487,15 +348,10 @@ async function startRecording() {
     captureStage = "audio setup";
     state.audioContext = new AudioContext();
     await state.audioContext.resume();
-    const sourcesToOpen = ["mic"];
-    if (displayStream?.getAudioTracks().length) sourcesToOpen.push("system");
-    captureStage = "connecting to the local models";
-    await Promise.all(sourcesToOpen.map(openModelSocket));
     state.startedAt = new Date();
     state.words = [];
     state.utterances = [];
     state.speakerNames = {};
-    state.audioCapture = {};
     state.audioBuffers = {};
     $("detailEyebrow").textContent = "LIVE SESSION";
     $("transcriptHeading").textContent = "Transcript preview";
@@ -517,10 +373,10 @@ async function startRecording() {
     $("recordStatus").textContent = "RECORDING LOCALLY";
     $("recordHeading").textContent = "Listening to your conversation";
     $("recordDescription").textContent = hasSystemAudio
-      ? "Qwen is transcribing live. Nemotron will add speaker labels when you stop."
+      ? "Audio is being recorded locally. Transcription and speaker labeling start after you stop."
       : displayCaptureIssue
-        ? "Qwen is transcribing your microphone live. Nemotron will add speaker labels when you stop."
-        : "Qwen is transcribing your microphone live. Share a browser tab with its audio to capture computer sound too.";
+        ? "Your microphone is being recorded locally. Transcription starts after you stop."
+        : "Your microphone is being recorded locally. Share a browser tab with its audio to capture computer sound too.";
     $("liveDot").classList.add("recording");
     $("captureHint").classList.toggle("hidden", hasSystemAudio);
     if (displayCaptureIssue) $("captureHint").textContent = displayCaptureIssue;
@@ -535,8 +391,6 @@ async function startRecording() {
   } catch (error) {
     displayStream?.getTracks().forEach((track) => track.stop());
     microphoneStream?.getTracks().forEach((track) => track.stop());
-    Object.values(state.sockets).forEach((socket) => socket.close());
-    state.sockets = {};
     state.displayStream = null;
     if (state.audioContext) await state.audioContext.close().catch(() => {});
     state.audioContext = null;
@@ -688,30 +542,31 @@ function pcmChunksToWav(chunks) {
   return new Blob([buffer], { type: "audio/wav" });
 }
 
-async function applyCapturedAudioDiarization() {
+async function transcribeCapturedAudio() {
   const processedSources = new Set();
-  const reprocessed = [];
+  const transcribed = [];
   const speakerNames = {};
   const warnings = [];
   for (const [source, chunks] of Object.entries(state.audioBuffers)) {
     if (!chunks.length) continue;
+    const label = source === "mic" ? "microphone" : "computer audio";
     try {
-      const filename = "live-" + source + ".wav";
-      const result = await request("/api/transcribe-file?filename=" + encodeURIComponent(filename) + "&source=" + encodeURIComponent(source), {
+      updateFileProgress({ stage: "uploading", percent: 0, detail: `Sending ${label} recording…` });
+      const result = await request("/api/transcribe-file?filename=" + encodeURIComponent("live-" + source + ".wav") + "&source=" + encodeURIComponent(source), {
         method: "POST",
         headers: { "Content-Type": "audio/wav" },
         body: pcmChunksToWav(chunks),
       });
       processedSources.add(source);
-      reprocessed.push(...(result.utterances || []));
+      transcribed.push(...(result.utterances || []));
       Object.assign(speakerNames, result.speaker_names || {});
-      if (result.warning) warnings.push(source + ": " + result.warning);
+      if (result.warning) warnings.push(`${label}: ${result.warning}`);
     } catch (error) {
-      warnings.push(source + ": " + error.message);
+      warnings.push(`${label}: ${error.message}`);
     }
   }
   if (processedSources.size) {
-    state.utterances = state.utterances.filter((item) => !processedSources.has(item.source)).concat(reprocessed);
+    state.utterances = state.utterances.filter((item) => !processedSources.has(item.source)).concat(transcribed);
     state.words = state.words.filter((item) => !processedSources.has(item.source));
   }
   state.speakerNames = {};
@@ -719,7 +574,7 @@ async function applyCapturedAudioDiarization() {
   Object.assign(state.speakerNames, speakerNames);
   renderLiveTranscript();
   state.audioBuffers = {};
-  if (warnings.length) showError("Some live audio could not be batch-transcribed with diarization: " + warnings.join("; "));
+  if (warnings.length) showError("Transcript saved with some processing warnings: " + warnings.join("; "));
 }
 
 function stopAudioNodes() {
@@ -749,55 +604,39 @@ async function stopRecording() {
   if (!state.recording || state.stopping) return;
   state.stopping = true;
   state.recording = false;
+  const end = new Date();
   updateFileButton();
   $("recordButton").disabled = true;
   $("recordButtonText").textContent = "Finishing transcript…";
   $("recordStatus").textContent = "SAVING SESSION";
   $("recordHeading").textContent = "Finishing your transcript";
-  $("recordDescription").textContent = "The final audio is being processed and saved locally.";
+  $("recordDescription").textContent = "Transcribing the recorded audio and detecting speakers locally…";
   $("liveDot").classList.remove("recording");
   stopAudioNodes();
 
-  const sockets = Object.entries(state.sockets);
-  const socketsToFlush = sockets.filter(([source]) => state.audioCapture[source]?.speechSeen);
-  const finalEvents = socketsToFlush.map(([source]) => new Promise((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      delete state.flushWaiters[source];
-      resolve();
-    };
-    const timeout = setTimeout(finish, 45000);
-    state.flushWaiters[source] = finish;
-  }));
-  socketsToFlush.forEach(([source, socket]) => {
-    if (socket.readyState === WebSocket.OPEN) {
-      try {
-        const capture = state.audioCapture[source];
-        socket.send(JSON.stringify({
-          type: "input_audio_buffer.commit",
-          start: capture?.utteranceStart ?? 0,
-          end: (capture?.samples || 0) / 16000,
-        }));
-      } catch {}
-    }
-  });
-  await Promise.all(finalEvents);
-  sockets.forEach(([, socket]) => { try { socket.close(1000, "Recording stopped"); } catch {} });
-  state.sockets = {};
   if (state.audioContext) await state.audioContext.close().catch(() => {});
   state.audioContext = null;
   $("partialLine").classList.add("hidden");
 
-  try { await applyCapturedAudioDiarization(); }
-  catch (error) {
+  try {
+    $("fileProgress").classList.remove("hidden");
+    const progressPoll = async () => {
+      try {
+        const progress = await request("/api/file-progress");
+        if (!["idle", "complete", "error"].includes(progress.stage)) updateFileProgress(progress);
+      } catch (_) { /* Keep the stop flow moving if progress polling fails. */ }
+    };
+    state.fileProgressTimer = setInterval(progressPoll, 700);
+    await transcribeCapturedAudio();
+    updateFileProgress({ stage: "complete", percent: 100, detail: "Transcription complete · saved locally" });
+  } catch (error) {
     state.audioBuffers = {};
-    showError(`Qwen transcription was saved without speaker diarization: ${error.message}`);
+    showError(`Could not transcribe the recorded audio: ${error.message}`);
+  } finally {
+    if (state.fileProgressTimer) clearInterval(state.fileProgressTimer);
+    state.fileProgressTimer = null;
   }
 
-  const end = new Date();
   const dateTitle = state.startedAt.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   const speakerNames = { ...state.speakerNames };
   try {
