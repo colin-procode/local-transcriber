@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local WebSocket adapter for Qwen3-ASR's vLLM streaming API."""
+"""Local WebSocket and batch adapter for Qwen3-ASR."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from qwen_asr import Qwen3ASRModel
 
 ready = False
 asr: Qwen3ASRModel | None = None
+backend_mode = "vllm"
 asr_lock = threading.Lock()
 progress_lock = threading.Lock()
 file_progress = {"active": False, "stage": "idle", "completed_chunks": 0, "total_chunks": 0, "duration": 0.0}
@@ -35,7 +36,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
-        payload = json.dumps({"ready": ready, "model": "Qwen3-ASR 1.7B"}).encode()
+        payload = json.dumps({"ready": ready, "model": "Qwen3-ASR 1.7B", "backend": backend_mode}).encode()
         self.send_response(200 if ready else 503)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
@@ -183,7 +184,7 @@ def transcribe_file(path: str, diarization_segments: list[dict] | None = None) -
             cursor = stop
 
     results: list[dict] = []
-    batch_size = 8
+    batch_size = 1 if backend_mode == "transformers" else 8
     with progress_lock:
         file_progress.update({"stage": "Transcribing audio", "total_chunks": len(work)})
     for offset in range(0, len(work), batch_size):
@@ -211,7 +212,7 @@ def main() -> None:
     parser.add_argument("--health-port", type=int, default=8768)
     args = parser.parse_args()
 
-    global asr, ready
+    global asr, backend_mode, ready
     health_servers = [ThreadingHTTPServer((args.host, args.health_port), HealthHandler)]
     if args.host not in {"127.0.0.1", "localhost"}:
         try:
@@ -220,16 +221,36 @@ def main() -> None:
             print(f"Loopback health listener unavailable: {exc}", flush=True)
     for health in health_servers:
         threading.Thread(target=health.serve_forever, daemon=True).start()
-    asr = Qwen3ASRModel.LLM(
-        model="Qwen/Qwen3-ASR-1.7B",
-        gpu_memory_utilization=0.85,
-        max_model_len=8192,
-        max_num_seqs=1,
-        max_num_batched_tokens=512,
-        enforce_eager=True,
-        max_new_tokens=64,
-    )
+    backend_mode = os.environ.get("TRANSCRIBER_QWEN_BACKEND", "auto").strip().lower()
+    if backend_mode not in {"auto", "vllm", "transformers"}:
+        parser.error("TRANSCRIBER_QWEN_BACKEND must be auto, vllm, or transformers")
+    if backend_mode == "auto":
+        import torch
+
+        backend_mode = "transformers" if torch.version.hip else "vllm"
+
+    if backend_mode == "transformers":
+        import torch
+
+        asr = Qwen3ASRModel.from_pretrained(
+            "Qwen/Qwen3-ASR-1.7B",
+            dtype=torch.float16,
+            device_map="cuda:0",
+            max_inference_batch_size=1,
+            max_new_tokens=64,
+        )
+    else:
+        asr = Qwen3ASRModel.LLM(
+            model="Qwen/Qwen3-ASR-1.7B",
+            gpu_memory_utilization=0.85,
+            max_model_len=8192,
+            max_num_seqs=1,
+            max_num_batched_tokens=512,
+            enforce_eager=True,
+            max_new_tokens=64,
+        )
     ready = True
+    print(f"Qwen ASR ready with {backend_mode} backend", flush=True)
     asyncio.run(run_websocket_server(args.host, args.port))
 
 

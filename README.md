@@ -12,9 +12,36 @@ On Linux with an NVIDIA GPU, run the setup script once:
 
 It installs FFmpeg and Python prerequisites when needed, installs NVIDIA's NeMo-Speech.cpp runtime, creates an isolated Qwen/vLLM Python environment, and downloads the Qwen3-ASR 1.7B and Nemotron 3 Diarization models. The setup requires internet access and several gigabytes of free disk space. Model inference runs locally after setup; no API key or hosted transcription service is used.
 
+On Ubuntu 22.04 in WSL with a supported AMD Radeon GPU, first install AMD's [ROCm 6.4.2 WSL stack](https://rocm.docs.amd.com/projects/radeon-ryzen/en/docs-7.1/docs/install/installrad/wsl/install-radeon.html) and confirm `rocminfo` lists the GPU, then run `./setup.sh`. This installs AMD's WSL-compatible PyTorch build and uses Qwen's Transformers backend for local transcription. The app detects the ROCm backend automatically.
+
 The app captures microphone and computer audio separately, then runs Qwen3-ASR 1.7B and Nemotron 3 Diarization after you stop recording. Uploaded files use the same local transcription and diarization pipeline. Captured PCM stays in memory until processing; the app does not save audio files.
 
 Use **Choose audio or video** and **Transcribe file** for local batch transcription. The app decodes the file with FFmpeg, sends the audio to Qwen as quickly as inference allows, and runs Nemotron diarization. The file does not play in the browser and stays on this computer. FFmpeg must be installed.
+
+## Python API
+
+`transcriber_client.py` lets Python programs send a local media file to the running app. `generate_transcript()` transcribes the file and saves the result to the transcript library; `transcribe_file()` returns the result without saving it.
+
+See [API.md](API.md) for client options, HTTP request and response formats, and transcript-library routes.
+
+```python
+from transcriber_client import LocalTranscriber
+
+client = LocalTranscriber()  # http://127.0.0.1:8000
+print(client.status())
+
+saved = client.generate_transcript("meeting.mp4", title="Project meeting")
+print(saved["id"])
+print(saved["transcript"]["utterances"])
+```
+
+The same workflow is available from the command line:
+
+```sh
+python3 transcriber_client.py meeting.mp4 --title "Project meeting"
+```
+
+Set `LOCAL_TRANSCRIBER_URL` or pass `base_url`/`--url` to use another app address. Use `save=False` or `--no-save` to return the transcription without adding it to the library. The HTTP routes used by the client are `GET /api/status`, `POST /api/transcribe-file`, and `POST /api/transcripts`.
 
 ## Run
 
