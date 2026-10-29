@@ -234,6 +234,14 @@ def safe_id(value: str) -> str:
     return value
 
 
+def parse_iso_datetime(value: str) -> datetime:
+    """Parse ISO timestamps, including the UTC Z suffix emitted by browsers."""
+    value = value.strip()
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    return datetime.fromisoformat(value)
+
+
 def transcript_path(transcript_id: str) -> Path:
     return TRANSCRIPTS_DIR / f"{safe_id(transcript_id)}.json"
 
@@ -434,8 +442,8 @@ class Handler(BaseHTTPRequestHandler):
             data = self.read_json()
             start_time = str(data["start_time"])
             end_time = str(data["end_time"])
-            start = datetime.fromisoformat(start_time)
-            end = datetime.fromisoformat(end_time)
+            start = parse_iso_datetime(start_time)
+            end = parse_iso_datetime(end_time)
             transcript_id = f"{start.strftime('%Y%m%d-%H%M%S')}_to_{end.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}"
             data.update({
                 "id": transcript_id,
